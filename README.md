@@ -58,3 +58,8 @@ Penggunaan otomatisasi di Facebook melanggar Terms of Service. Gunakan dengan ri
 
 **Requirements**
 Python 3.9+ 
+
+**Cara Menjalankan di Windows**
+- Opsi paling gampang: klik dua kali `start.bat`
+- Dari PowerShell tanpa aktivasi venv: `.\.venv\Scripts\python.exe main.py`
+- Jika ingin pakai script PowerShell: `powershell -ExecutionPolicy Bypass -File .\start.ps1`
