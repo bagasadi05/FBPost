@@ -337,6 +337,7 @@ class BotWorker(QThread):
         self.log.emit(message, category)
         if log_to_file:
             try:
+                import datetime
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with open("app.log", "a", encoding="utf-8") as f:
                     f.write(f"[{ts}] [{category.upper()}] {message}\n")
