@@ -22,6 +22,7 @@ from PySide6.QtGui import QFont, QPalette, QColor, QCloseEvent
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
@@ -34,6 +35,7 @@ COOKIE_FILE = APP_DIR / "cookies.json"
 GROUP_FILE  = APP_DIR / "groups.txt"
 LOG_FILE = APP_DIR / "app.log"
 FAILED_GROUPS_FILE = APP_DIR / "failed_groups.txt"
+POSTED_GROUPS_FILE = APP_DIR / "posted_groups.json"
 SCREENSHOT_DIR = APP_DIR / "screenshots"
 SETTINGS_FILE = APP_DIR / "ui_settings.json"
 REPORTS_DIR = APP_DIR / "reports"
@@ -50,6 +52,7 @@ SUPPORTED_MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpeg", ".mpg", ".m4v"
 }
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
 # â”€â”€â”€ Helper Functions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -83,6 +86,21 @@ def capture_screenshot_on_error(driver, custom_name="error"):
 
 def sanitize_text(text):
     return ''.join(c for c in text if ord(c) <= 0xFFFF)
+
+
+def xpath_literal(text):
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    parts = text.split("'")
+    concat_parts = []
+    for i, part in enumerate(parts):
+        if part:
+            concat_parts.append(f"'{part}'")
+        if i != len(parts) - 1:
+            concat_parts.append('"\'"')
+    return f"concat({', '.join(concat_parts)})"
 
 
 def load_cookies(driver):
@@ -194,16 +212,52 @@ def load_generated_posts():
         return []
 
 
+def extract_required_urls(text):
+    urls = []
+    seen = set()
+
+    for raw in URL_PATTERN.findall(text or ""):
+        cleaned = raw.strip().rstrip(".,!?;:)]}\"'")
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        urls.append(cleaned)
+
+    return urls
+
+
+def ensure_required_urls(text, required_urls):
+    normalized = (text or "").strip()
+    if not normalized or not required_urls:
+        return normalized
+
+    missing = [url for url in required_urls if url not in normalized]
+    if missing:
+        normalized = f"{normalized}\n" + "\n".join(missing)
+
+    return normalized.strip()
+
+
 def generate_openrouter_variations(api_key, model, source_text, count):
     api_key = (api_key or os.getenv("OPENROUTER_API_KEY", "")).strip()
     model = (model or DEFAULT_OPENROUTER_MODEL).strip()
     source_text = source_text.strip()
+    required_urls = extract_required_urls(source_text)
     if not api_key:
         raise ValueError("API key OpenRouter wajib diisi")
     if not source_text:
         raise ValueError("Isi posting wajib diisi sebelum generate variasi")
     if count <= 0:
         raise ValueError("Jumlah variasi harus lebih besar dari 0")
+
+    required_url_rules = ""
+    if required_urls:
+        url_lines = "\n".join([f"  {idx}. {url}" for idx, url in enumerate(required_urls, start=1)])
+        required_url_rules = (
+            "- WAJIB menyertakan SEMUA URL berikut persis sama di setiap variasi\n"
+            "  (tidak boleh diubah, dipendekkan, atau dihapus):\n"
+            f"{url_lines}\n"
+        )
 
     prompt = (
         f"Buat {count} variasi caption dalam bahasa Indonesia berdasarkan teks berikut.\n\n"
@@ -214,6 +268,7 @@ def generate_openrouter_variations(api_key, model, source_text, count):
         "- Gaya natural, santai, tidak kaku\n"
         "- Jangan pakai hashtag\n"
         "- Jangan pakai emoji\n"
+        f"{required_url_rules}"
         "- Output wajib JSON array of strings, tanpa penjelasan lain\n\n"
         f"Teks sumber:\n{source_text}"
     )
@@ -261,7 +316,11 @@ def generate_openrouter_variations(api_key, model, source_text, count):
             raise RuntimeError("Model tidak mengembalikan JSON array yang valid")
         parsed = json.loads(match.group(0))
 
-    posts = [item.strip() for item in parsed if isinstance(item, str) and item.strip()]
+    posts = [
+        ensure_required_urls(item.strip(), required_urls)
+        for item in parsed
+        if isinstance(item, str) and item.strip()
+    ]
     deduped = []
     seen = set()
     for post in posts:
@@ -279,10 +338,13 @@ def build_ai_caption_plan(api_key, model, source_text, target_count, existing_po
     if target_count <= 0:
         return []
 
+    required_urls = extract_required_urls(source_text)
+
     planned = []
     seen = set()
     for post in existing_posts or []:
         cleaned = post.strip() if isinstance(post, str) else ""
+        cleaned = ensure_required_urls(cleaned, required_urls)
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             planned.append(cleaned)
@@ -306,6 +368,7 @@ def build_ai_caption_plan(api_key, model, source_text, target_count, existing_po
         batch = generate_openrouter_variations(api_key, model, prompt_text, batch_target)
         added = 0
         for post in batch:
+            post = ensure_required_urls(post, required_urls)
             if post in seen:
                 continue
             seen.add(post)
@@ -385,6 +448,87 @@ def write_run_report(mode, result_count, processed_total=0, failed_urls=None, gr
     return str(txt_path)
 
 
+def load_posted_groups_state():
+    if not POSTED_GROUPS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(POSTED_GROUPS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except:
+        pass
+    return {}
+
+
+def save_posted_groups_state(state):
+    try:
+        POSTED_GROUPS_FILE.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except:
+        pass
+
+
+def get_uploaded_group_urls():
+    state = load_posted_groups_state()
+    uploaded = set()
+    for raw_url, info in state.items():
+        normalized = normalize_group_urls([raw_url])
+        if not normalized:
+            continue
+        status = ""
+        if isinstance(info, dict):
+            status = str(info.get("status", "")).lower()
+        elif isinstance(info, str):
+            status = info.lower()
+        if status in {"success", "pending", "uploaded"}:
+            uploaded.add(normalized[0])
+    return uploaded
+
+
+def update_posted_groups_state(group_results):
+    if not group_results:
+        return 0
+
+    state = load_posted_groups_state()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    changed = 0
+
+    for item in group_results:
+        status = str(item.get("status", "")).lower()
+        if status not in {"success", "pending"}:
+            continue
+
+        raw_url = str(item.get("url", "")).strip()
+        normalized = normalize_group_urls([raw_url])
+        if not normalized:
+            continue
+        url = normalized[0]
+
+        current = state.get(url, {})
+        if not isinstance(current, dict):
+            current = {"status": str(current)}
+
+        prev_status = str(current.get("status", "")).lower()
+        if prev_status == "success" and status == "pending":
+            status = "success"
+
+        new_payload = {
+            "status": status,
+            "updated_at": now,
+            "reason": str(item.get("reason", ""))[:160],
+        }
+
+        if state.get(url) != new_payload:
+            state[url] = new_payload
+            changed += 1
+
+    if changed > 0:
+        save_posted_groups_state(state)
+    return changed
+
+
 def normalize_media_paths(paths):
     normalized = []
     seen = set()
@@ -411,15 +555,35 @@ def normalize_media_paths(paths):
 
 # â”€â”€â”€ Posting Logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def wait_post_dialog(driver, timeout=10):
-    dialog_xpath = (
-        "//div[@role='dialog' and .//div[@role='textbox' and @contenteditable='true']]"
+    lowered_attr = "translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    lowered_text = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    strict_dialog_xpath = (
+        "//div[@role='dialog'"
+        " and .//div[@role='textbox' and @contenteditable='true']"
+        " and .//div[@role='button' and ("
+        f"contains({lowered_attr}, 'post') or "
+        f"contains({lowered_attr}, 'posting') or "
+        f"contains({lowered_attr}, 'kirim') or "
+        f"contains({lowered_attr}, 'publikasikan') or "
+        f"contains({lowered_text}, 'post') or "
+        f"contains({lowered_text}, 'posting') or "
+        f"contains({lowered_text}, 'kirim') or "
+        f"contains({lowered_text}, 'publikasikan')"
+        ")]"
+        "]"
     )
+    relaxed_dialog_xpath = "//div[@role='dialog' and .//div[@role='textbox' and @contenteditable='true']]"
     try:
         return WebDriverWait(driver, timeout).until(
-            EC.visibility_of_element_located((By.XPATH, dialog_xpath))
+            EC.visibility_of_element_located((By.XPATH, strict_dialog_xpath))
         )
     except:
-        return None
+        try:
+            return WebDriverWait(driver, max(2, int(timeout / 2))).until(
+                EC.visibility_of_element_located((By.XPATH, relaxed_dialog_xpath))
+            )
+        except:
+            return None
 
 
 def open_group_composer(driver):
@@ -436,44 +600,89 @@ def open_group_composer(driver):
         except:
             pass
 
+        # Composer mungkin sudah terbuka dari aksi sebelumnya.
+        dialog = wait_post_dialog(driver, timeout=2)
+        if dialog is not None:
+            return dialog
+
         keywords = [
-            "tulis sesuatu", "write something", "buat postingan", "buat pos",
-            "create post", "create public post", "kirim postingan",
-            "what's on your mind", "jual sesuatu", "sell something"
+            "tulis sesuatu", "write something", "buat postingan",
+            "create post", "create public post",
+            "what's on your mind", "what is on your mind",
+            "apa yang anda pikirkan", "buat postingan publik"
         ]
-        lowered = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
-        keyword_text_xpath = " or ".join([f"contains({lowered}, '{kw}')" for kw in keywords])
+        lowered = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+        lowered_aria = "translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+        keyword_text_xpath = " or ".join(
+            [f"contains({lowered}, {xpath_literal(kw)})" for kw in keywords]
+        )
         keyword_aria_xpath = " or ".join([
-            "contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
-            f"'{kw}')"
+            f"contains({lowered_aria}, {xpath_literal(kw)})"
             for kw in keywords
         ])
-        trigger_xpath = " | ".join([
+        trigger_xpaths = [
             (
-                "//div[@role='button'"
+                "//div[@role='main']//span["
+                f"{keyword_text_xpath}"
+                "]/ancestor::*[(self::div or self::span)"
+                " and (@role='button' or @tabindex='0' or @aria-haspopup='dialog')][1]"
+            ),
+            (
+                "//div[@role='main']//div[@role='button'"
                 " and not(ancestor::div[@role='dialog'])"
-                " and not(ancestor::div[@role='article'])"
+                " and not(ancestor::div[@role='complementary'])"
+                f" and ({keyword_aria_xpath})]"
+            ),
+            (
+                "//div[@role='main']//div[@role='button'"
+                " and not(ancestor::div[@role='dialog'])"
+                " and not(ancestor::div[@role='complementary'])"
+                " and string-length(normalize-space(.)) < 180"
                 f" and ({keyword_text_xpath})]"
             ),
             (
-                "//div[@role='button'"
+                "//div[@role='main']//*[@tabindex='0'"
                 " and not(ancestor::div[@role='dialog'])"
-                " and not(ancestor::div[@role='article'])"
-                f" and ({keyword_aria_xpath})]"
+                " and not(ancestor::div[@role='complementary'])"
+                f" and ({keyword_text_xpath} or {keyword_aria_xpath})]"
+            ),
+            (
+                "//div[@role='main']//div[@role='textbox' and @contenteditable='true'"
+                " and not(ancestor::div[@role='dialog'])"
+                " and not(contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cari'))"
+                " and not(contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'search'))"
+                "]"
             )
-        ])
+        ]
 
-        triggers = driver.find_elements(By.XPATH, trigger_xpath)
-        for trigger in triggers:
+        triggers = []
+        seen_ids = set()
+        for trigger_xpath in trigger_xpaths:
+            for candidate in driver.find_elements(By.XPATH, trigger_xpath):
                 try:
-                    if not trigger.is_displayed():
+                    if not candidate.is_displayed():
                         continue
-                    driver.execute_script("arguments[0].click();", trigger)
-                    dialog = wait_post_dialog(driver, timeout=6)
-                    if dialog is not None:
-                        return dialog
-                except:
+                    candidate_id = candidate.id
+                    if candidate_id in seen_ids:
+                        continue
+                    seen_ids.add(candidate_id)
+                    triggers.append(candidate)
+                except Exception:
                     continue
+
+        for trigger in triggers:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", trigger)
+                human_delay(0.4, 0.9)
+                try:
+                    trigger.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", trigger)
+                dialog = wait_post_dialog(driver, timeout=6)
+                if dialog is not None:
+                    return dialog
+            except Exception:
+                continue
 
         return None
     except Exception as e:
@@ -483,13 +692,34 @@ def open_group_composer(driver):
 
 def wait_group_editor(driver, container=None, timeout=20):
     search_root = container or driver
+    lowered_aria = "translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+
+    # Jika container sudah textbox editor, langsung pakai.
+    try:
+        if (
+            container is not None
+            and container.get_attribute("role") == "textbox"
+            and container.get_attribute("contenteditable") == "true"
+            and container.is_displayed()
+        ):
+            return container
+    except Exception:
+        pass
+
     try:
         return WebDriverWait(driver, timeout).until(
             lambda d: next(iter([
                 el for el in search_root.find_elements(
                     By.XPATH,
-                    ".//div[@role='textbox' and @contenteditable='true' and @data-lexical-editor='true']"
-                    " | .//div[@role='textbox' and @contenteditable='true']"
+                    ".//div[@role='textbox' and @contenteditable='true' and @data-lexical-editor='true'"
+                    f" and not(contains({lowered_aria}, 'cari'))"
+                    f" and not(contains({lowered_aria}, 'search'))"
+                    "]"
+                    " | "
+                    ".//div[@role='textbox' and @contenteditable='true'"
+                    f" and not(contains({lowered_aria}, 'cari'))"
+                    f" and not(contains({lowered_aria}, 'search'))"
+                    "]"
                 )
                 if el.is_displayed()
             ]), None)
@@ -553,6 +783,9 @@ def upload_media_files(driver, media_paths, container=None, timeout=45):
 def input_text_strict(driver, element, text):
     clean = sanitize_text(text)
     try:
+        if not clean.strip():
+            return False
+
         WebDriverWait(driver, 8).until(lambda d: element.is_displayed())
         driver.execute_script("""
             arguments[0].scrollIntoView({block: 'center'});
@@ -613,22 +846,132 @@ def input_text_strict(driver, element, text):
             "return (arguments[0].innerText || arguments[0].textContent || '').trim();",
             element
         )
-        return bool(final_text)
+
+        final_norm = re.sub(r"\s+", " ", (final_text or "").replace("\u200b", " ")).strip().lower()
+        clean_norm = re.sub(r"\s+", " ", clean).strip().lower()
+
+        placeholders = (
+            "tulis sesuatu",
+            "write something",
+            "buat postingan",
+            "buat postingan publik",
+            "what's on your mind",
+            "what is on your mind",
+            "apa yang anda pikirkan",
+        )
+        if not final_norm:
+            return False
+        if any(p in final_norm for p in placeholders):
+            return False
+
+        # Verifikasi isi editor benar-benar memuat sebagian teks yang dikirim.
+        sample = clean_norm[: min(24, len(clean_norm))]
+        return bool(sample and sample in final_norm)
     except Exception as e:
         print("input error:", e)
         return False
 
 
 def wait_post_button(driver, container=None, timeout=20):
-    search_root = container or driver
+    lowered_text = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    lowered_aria = "translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+
+    action_words = ["post", "posting", "kirim", "publikasikan", "publish"]
+    text_predicate = " or ".join([f"contains({lowered_text}, '{word}')" for word in action_words])
+    aria_predicate = " or ".join([f"contains({lowered_aria}, '{word}')" for word in action_words])
+
+    button_xpath = (
+        ".//div[@role='button' and ("
+        f"{aria_predicate} or {text_predicate}"
+        ")]"
+        " | "
+        ".//button[("
+        f"{aria_predicate} or {text_predicate}"
+        ")]"
+        " | "
+        ".//span[("
+        f"{text_predicate}"
+        ")]/ancestor::*[(self::div or self::span or self::button) and (@role='button' or name()='button' or @tabindex='0')][1]"
+    )
+
+    def _pick_enabled_button(root):
+        blocked_phrases = (
+            "tambahkan ke postingan",
+            "add to your post",
+            "foto/video",
+            "photo/video",
+            "photos/videos",
+            "perasaan",
+            "feeling/activity",
+            "polling",
+            "lokasi",
+            "tag people",
+            "tambahkan grup",
+            "add group",
+        )
+        preferred_exact = {"post", "posting", "kirim", "publikasikan", "publish"}
+        best_btn = None
+        best_score = -1
+
+        for btn in root.find_elements(By.XPATH, button_xpath):
+            try:
+                if not btn.is_displayed():
+                    continue
+                aria_disabled = (btn.get_attribute("aria-disabled") or "").strip().lower()
+                disabled_attr = btn.get_attribute("disabled")
+                if aria_disabled == "true" or disabled_attr is not None:
+                    continue
+
+                label_raw = " ".join([
+                    (btn.get_attribute("aria-label") or ""),
+                    (btn.text or "")
+                ])
+                label = re.sub(r"\s+", " ", label_raw).strip().lower()
+                if not label:
+                    continue
+                if any(phrase in label for phrase in blocked_phrases):
+                    continue
+                if not any(word in label for word in action_words):
+                    continue
+
+                score = 0
+                if label in preferred_exact:
+                    score += 10
+                if any(f" {word} " in f" {label} " for word in action_words):
+                    score += 5
+                if len(label) <= 18:
+                    score += 3
+                if "postingan" in label and label not in preferred_exact:
+                    score -= 2
+
+                if score > best_score:
+                    best_btn = btn
+                    best_score = score
+            except Exception:
+                continue
+        return best_btn
+
+    def _resolve_search_roots():
+        roots = []
+        if container is not None:
+            roots.append(container)
+            try:
+                if container.get_attribute("role") == "textbox":
+                    parent_dialogs = container.find_elements(By.XPATH, "./ancestor::div[@role='dialog'][1]")
+                    if parent_dialogs:
+                        roots.append(parent_dialogs[0])
+            except Exception:
+                pass
+        roots.append(driver)
+        return roots
+
     try:
         return WebDriverWait(driver, timeout).until(
             lambda d: next(iter([
-                btn for btn in search_root.find_elements(
-                    By.XPATH,
-                    ".//div[@role='button' and (contains(@aria-label, 'Post') or contains(@aria-label, 'Posting') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'post'))]"
-                )
-                if btn.is_displayed() and btn.is_enabled()
+                btn
+                for root in _resolve_search_roots()
+                for btn in [_pick_enabled_button(root)]
+                if btn is not None
             ]), None)
         )
     except:
@@ -666,6 +1009,10 @@ class BotWorker(QThread):
         groups=None,
         media_paths=None,
         content_variants=None,
+        content_mode=0,
+        ai_api_key="",
+        ai_model="",
+        ai_fallback_to_manual=True,
         headless=True,
         stop_on_pending=False,
         burst_pause_every=0,
@@ -681,12 +1028,18 @@ class BotWorker(QThread):
         self.groups     = groups or []
         self.media_paths = media_paths or []
         self.content_variants = content_variants or []
+        self.content_mode = content_mode
+        self.ai_api_key = (ai_api_key or "").strip()
+        self.ai_model = (ai_model or DEFAULT_OPENROUTER_MODEL).strip()
+        self.ai_fallback_to_manual = ai_fallback_to_manual
         self.headless   = headless
         self.stop_on_pending = stop_on_pending
         self.burst_pause_every = burst_pause_every
         self.burst_pause_min = burst_pause_min
         self.burst_pause_max = burst_pause_max
         self._stop_flag = False
+        self._ai_seen_posts = set()
+        self._ai_recent_posts = []
 
     def request_stop(self):
         self._stop_flag = True
@@ -711,6 +1064,50 @@ class BotWorker(QThread):
                     f.write(f"[{ts}] [{category.upper()}] {message}\n")
             except:
                 pass
+
+    def generate_ai_caption_live(self):
+        base_text = (self.text or "").strip()
+        if not base_text:
+            return None, "Teks dasar kosong"
+        if not self.ai_api_key:
+            return None, "API key OpenRouter wajib diisi"
+
+        for attempt in range(1, 4):
+            prompt_text = base_text
+            if self._ai_recent_posts:
+                recent_samples = "\n".join(f"- {item}" for item in self._ai_recent_posts[-8:])
+                prompt_text = (
+                    f"{base_text}\n\n"
+                    "Hindari mengulang variasi yang mirip dengan daftar berikut:\n"
+                    f"{recent_samples}"
+                )
+
+            try:
+                generated = generate_openrouter_variations(
+                    self.ai_api_key,
+                    self.ai_model,
+                    prompt_text,
+                    1,
+                )
+            except Exception as exc:
+                return None, str(exc)
+
+            if not generated:
+                continue
+
+            candidate = generated[0].strip()
+            if not candidate:
+                continue
+            if candidate in self._ai_seen_posts and attempt < 3:
+                continue
+
+            self._ai_seen_posts.add(candidate)
+            self._ai_recent_posts.append(candidate)
+            if len(self._ai_recent_posts) > 20:
+                self._ai_recent_posts = self._ai_recent_posts[-20:]
+            return candidate, None
+
+        return None, "Model mengembalikan caption kosong atau duplikat"
 
     def run(self):
         options = Options()
@@ -805,7 +1202,28 @@ class BotWorker(QThread):
 
                     editor = wait_group_editor(driver, container=composer_dialog, timeout=12)
                     text_to_post = ""
-                    if self.content_variants and i <= len(self.content_variants):
+                    if self.content_mode == 1:
+                        self.emit_log("   Membuat caption AI untuk grup ini...", "info")
+                        ai_text, ai_error = self.generate_ai_caption_live()
+                        if ai_text:
+                            text_to_post = ai_text
+                        elif self.ai_fallback_to_manual and self.text:
+                            text_to_post = parse_spintax(self.text)
+                            self.emit_log(
+                                f"   AI gagal ({str(ai_error)[:120]}), fallback ke teks manual",
+                                "warning"
+                            )
+                        else:
+                            self.emit_log(
+                                f"   Generate caption AI gagal: {str(ai_error)[:140]}",
+                                "error"
+                            )
+                            capture_screenshot_on_error(driver, f"err_ai_caption_{short_url}")
+                            failed_urls.append(url)
+                            current_result["reason"] = f"Generate caption AI gagal: {str(ai_error)[:140]}"
+                            group_results.append(current_result)
+                            continue
+                    elif self.content_variants and i <= len(self.content_variants):
                         text_to_post = self.content_variants[i - 1]
                     elif self.text:
                         text_to_post = parse_spintax(self.text)
@@ -846,26 +1264,60 @@ class BotWorker(QThread):
                         else:
                             human_delay(4, 7)
 
-                    # Tutup overlay "Tambahkan ke postingan Anda" jika terbuka (muncul sebagai portal DOM terpisah)
+                    # Tutup overlay tambahan saja, jangan sampai menutup modal composer utama.
                     try:
-                        overlay_open = False
-                        titles = driver.find_elements(By.XPATH, "//div[@role='dialog']//*[not(*) and (contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'tambahkan ke postingan') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add to your post'))]")
-                        for t in titles:
-                            if t.is_displayed():
-                                overlay_open = True
-                                dialog_node = t.find_element(By.XPATH, "./ancestor::div[@role='dialog'][1]")
-                                # Tombol "back" (panah kiri) hampir dipastikan adalah elemen role=button pertama di struktur modal ini
-                                all_btn = dialog_node.find_elements(By.XPATH, ".//div[@role='button']")
-                                if all_btn:
-                                    driver.execute_script("arguments[0].click();", all_btn[0])
-                                    import time
-                                    time.sleep(1.5)
-                                break
+                        visible_dialogs = [
+                            d for d in driver.find_elements(By.XPATH, "//div[@role='dialog']") if d.is_displayed()
+                        ]
+                        if len(visible_dialogs) > 1:
+                            lowered = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+                            for dialog_node in visible_dialogs:
+                                try:
+                                    has_editor = bool(dialog_node.find_elements(
+                                        By.XPATH,
+                                        ".//div[@role='textbox' and @contenteditable='true']"
+                                    ))
+                                    has_add_overlay_title = bool(dialog_node.find_elements(
+                                        By.XPATH,
+                                        ".//*[contains(" + lowered + ", 'tambahkan ke postingan') or contains(" + lowered + ", 'add to your post')]"
+                                    ))
+                                    if not has_add_overlay_title or has_editor:
+                                        continue
+
+                                    close_buttons = dialog_node.find_elements(
+                                        By.XPATH,
+                                        ".//div[@role='button' and (contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'tutup') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'back') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kembali'))]"
+                                        " | .//button[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'tutup')]"
+                                    )
+                                    if close_buttons:
+                                        driver.execute_script("arguments[0].click();", close_buttons[0])
+                                        human_delay(0.5, 1.1)
+                                except Exception:
+                                    continue
                     except Exception:
                         pass
 
-                    btn = wait_post_button(driver, container=composer_dialog)
-                    if not btn:
+                    btn = wait_post_button(driver, container=composer_dialog, timeout=12)
+                    if not btn and editor is not None:
+                        btn = wait_post_button(driver, container=editor, timeout=4)
+
+                    used_shortcut_submit = False
+                    if not btn and editor is not None:
+                        self.emit_log("   Tombol Post belum terdeteksi, mencoba Ctrl+Enter...", "warning")
+                        try:
+                            driver.execute_script("arguments[0].focus();", editor)
+                            ActionChains(driver).move_to_element(editor).click().key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
+                            used_shortcut_submit = True
+                            human_delay(1.0, 2.0)
+                        except Exception:
+                            try:
+                                editor.send_keys(Keys.CONTROL, Keys.ENTER)
+                                used_shortcut_submit = True
+                                human_delay(1.0, 2.0)
+                            except Exception:
+                                used_shortcut_submit = False
+
+                    if not btn and not used_shortcut_submit:
                         self.emit_log("   Tombol Post tidak muncul/aktif", "error")
                         capture_screenshot_on_error(driver, f"err_btn_post_{short_url}")
                         failed_urls.append(url)
@@ -873,20 +1325,46 @@ class BotWorker(QThread):
                         group_results.append(current_result)
                         continue
 
-                    driver.execute_script("arguments[0].click();", btn)
+                    if btn:
+                        try:
+                            btn.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", btn)
                     
                     dialog_closed = False
-                    for _ in range(15):
-                        try:
-                            if not composer_dialog.is_displayed():
+                    is_dialog_composer = False
+                    try:
+                        is_dialog_composer = (composer_dialog.get_attribute("role") == "dialog")
+                    except Exception:
+                        is_dialog_composer = False
+
+                    if not is_dialog_composer:
+                        dialog_closed = True
+                    else:
+                        for _ in range(15):
+                            try:
+                                if not composer_dialog.is_displayed():
+                                    dialog_closed = True
+                                    break
+                            except Exception:
                                 dialog_closed = True
                                 break
-                        except Exception:
-                            dialog_closed = True
-                            break
-                        import time
-                        time.sleep(2)
-                        
+                            import time
+                            time.sleep(2)
+
+                    if used_shortcut_submit and not dialog_closed:
+                        # Beberapa UI butuh sedikit waktu tambahan setelah submit via shortcut.
+                        for _ in range(4):
+                            try:
+                                if not composer_dialog.is_displayed():
+                                    dialog_closed = True
+                                    break
+                            except Exception:
+                                dialog_closed = True
+                                break
+                            import time
+                            time.sleep(1)
+
                     if not dialog_closed:
                         self.emit_log("   Tombol post diklik tapi form tidak tertutup (kemungkinan terblokir/error)", "error")
                         capture_screenshot_on_error(driver, f"err_dialog_stuck_{short_url}")
@@ -894,7 +1372,7 @@ class BotWorker(QThread):
                         current_result["reason"] = "Form posting tidak tertutup"
                         group_results.append(current_result)
                         continue
-                        
+
                     human_delay(2, 4)
 
                     if check_pending_post(driver):
@@ -905,6 +1383,7 @@ class BotWorker(QThread):
                             group_results.append(current_result)
                             self.emit_log("Safety mode aktif: proses dihentikan karena post masuk pending admin", "warning")
                             break
+                        self.emit_log("   Lanjut ke grup berikutnya karena status pending admin", "info")
                     else:
                         self.emit_log("   Berhasil diposting âœ“", "success")
                         current_result["status"] = "success"
@@ -945,6 +1424,14 @@ class BotWorker(QThread):
                         f.write("\n".join(failed_urls))
                     self.emit_log(f"Menyimpan {len(failed_urls)} grup yang gagal ke {FAILED_GROUPS_FILE.name}", "info")
                 except: pass
+
+            if self.mode == "post":
+                updated_count = update_posted_groups_state(group_results)
+                if updated_count > 0:
+                    self.emit_log(
+                        f"Memperbarui riwayat grup terupload: {updated_count} grup",
+                        "info"
+                    )
 
             report_path = write_run_report(
                 "post",
@@ -1386,7 +1873,7 @@ class FacebookPosterUI(QMainWindow):
         settings_layout.addWidget(mode_label)
 
         self.combo_content_mode = QComboBox()
-        self.combo_content_mode.addItems(["Spintax / Manual", "AI Batch OpenRouter"])
+        self.combo_content_mode.addItems(["Spintax / Manual", "AI Realtime OpenRouter"])
         self.combo_content_mode.currentIndexChanged.connect(self._update_content_mode_ui)
         settings_layout.addWidget(self.combo_content_mode)
 
@@ -1414,7 +1901,7 @@ class FacebookPosterUI(QMainWindow):
         self.chk_safe_mode.setChecked(True)
         settings_layout.addWidget(self.chk_safe_mode)
 
-        self.chk_stop_on_pending = QCheckBox("Berhenti jika post masuk pending admin")
+        self.chk_stop_on_pending = QCheckBox("Skip jika post masuk pending admin (lanjut grup lain)")
         self.chk_stop_on_pending.setChecked(True)
         settings_layout.addWidget(self.chk_stop_on_pending)
 
@@ -1448,7 +1935,7 @@ class FacebookPosterUI(QMainWindow):
         ai_layout.setContentsMargins(16, 16, 16, 16)
         ai_layout.setSpacing(12)
 
-        ai_hint = QLabel("Kontrol AI dipakai untuk generate batch caption sebelum proses posting dimulai.")
+        ai_hint = QLabel("Mode AI posting sekarang realtime: caption dibuat saat giliran tiap grup. Tombol generate tetap bisa dipakai untuk preview/manual draft.")
         ai_hint.setObjectName("helperText")
         ai_hint.setWordWrap(True)
         ai_layout.addWidget(ai_hint)
@@ -1804,7 +2291,11 @@ class FacebookPosterUI(QMainWindow):
         self.chk_auto_fallback.setChecked(bool(settings.get("auto_fallback_manual", True)))
         self.chk_skip_confirm.setChecked(bool(settings.get("skip_post_confirm", False)))
         self.chk_safe_mode.setChecked(bool(settings.get("safe_mode", True)))
-        self.chk_stop_on_pending.setChecked(bool(settings.get("stop_on_pending", True)))
+        if "skip_on_pending" in settings:
+            self.chk_stop_on_pending.setChecked(bool(settings.get("skip_on_pending", True)))
+        else:
+            # Default perilaku baru: pending admin langsung lanjut ke grup berikutnya.
+            self.chk_stop_on_pending.setChecked(True)
         self.spin_safe_session_cap.setValue(int(settings.get("safe_session_cap", SAFE_SESSION_CAP)))
 
         draft_text = settings.get("draft_text", "")
@@ -1826,7 +2317,8 @@ class FacebookPosterUI(QMainWindow):
             "auto_fallback_manual": self.chk_auto_fallback.isChecked(),
             "skip_post_confirm": self.chk_skip_confirm.isChecked(),
             "safe_mode": self.chk_safe_mode.isChecked(),
-            "stop_on_pending": self.chk_stop_on_pending.isChecked(),
+            "skip_on_pending": self.chk_stop_on_pending.isChecked(),
+            "stop_on_pending": not self.chk_stop_on_pending.isChecked(),
             "safe_session_cap": self.spin_safe_session_cap.value(),
             "draft_text": self.post_edit.toPlainText(),
         })
@@ -2009,6 +2501,34 @@ class FacebookPosterUI(QMainWindow):
             QMessageBox.warning(self, "Peringatan", "Isi postingan atau pilih minimal satu media!")
             return
 
+        uploaded_groups = get_uploaded_group_urls()
+        candidate_groups = []
+        for group in all_groups:
+            normalized = normalize_group_urls([group])
+            if not normalized:
+                continue
+            normalized_group = normalized[0]
+            if normalized_group in uploaded_groups:
+                continue
+            candidate_groups.append(normalized_group)
+
+        skipped_uploaded = len(all_groups) - len(candidate_groups)
+        if skipped_uploaded > 0:
+            self.log(
+                f"Melewati {skipped_uploaded} grup karena sudah pernah upload/pending sebelumnya.",
+                "info"
+            )
+
+        if not candidate_groups:
+            self._cancel_smart_pipeline()
+            QMessageBox.information(
+                self,
+                "Tidak Ada Target Baru",
+                "Semua grup pada daftar sudah pernah diposting/pending.\n"
+                "Tambahkan grup baru atau hapus riwayat di posted_groups.json jika ingin repost."
+            )
+            return
+
         min_d = self.spin_min.value()
         max_d = self.spin_max.value()
         if min_d >= max_d:
@@ -2017,7 +2537,7 @@ class FacebookPosterUI(QMainWindow):
             return
 
         post_limit = self.spin_post_limit.value()
-        groups = all_groups if post_limit == 0 else all_groups[:post_limit]
+        groups = candidate_groups if post_limit == 0 else candidate_groups[:post_limit]
         total = len(groups)
         if total <= 0:
             self._cancel_smart_pipeline()
@@ -2025,7 +2545,7 @@ class FacebookPosterUI(QMainWindow):
             return
 
         safe_mode = self.chk_safe_mode.isChecked()
-        stop_on_pending = self.chk_stop_on_pending.isChecked()
+        skip_on_pending = self.chk_stop_on_pending.isChecked()
         burst_pause_every = 0
         burst_pause_min = 0
         burst_pause_max = 0
@@ -2059,41 +2579,14 @@ class FacebookPosterUI(QMainWindow):
                 self._cancel_smart_pipeline()
                 QMessageBox.warning(self, "Peringatan", "Isi posting dasar wajib diisi untuk generate caption AI.")
                 return
-            try:
-                self.lbl_status.setText("Menyiapkan caption AI per grup...")
-                self.log(f"Menyiapkan {total} caption AI untuk {total} grup target...", "info")
-                content_variants = build_ai_caption_plan(api_key, model, text, total, existing_posts=self.generated_posts)
-            except Exception as exc:
-                self.lbl_status.setText("Generate caption AI gagal")
-                self.log(f"Persiapan caption AI gagal: {str(exc)}", "error")
-                if not self.chk_auto_fallback.isChecked():
-                    fallback_reply = QMessageBox.question(
-                        self,
-                        "Generate Gagal",
-                        f"{str(exc)}\n\nGunakan mode manual / spintax sebagai fallback untuk melanjutkan posting?",
-                        QMessageBox.Yes | QMessageBox.No
-                    )
-                    if fallback_reply != QMessageBox.Yes:
-                        self._cancel_smart_pipeline()
-                        return
-                content_mode = 0
-                self.combo_content_mode.setCurrentIndex(0)
-                self.log("Fallback ke mode manual / spintax untuk melanjutkan posting.", "warning")
-
-            if content_variants:
-                self.generated_posts = list(content_variants)
-                save_generated_posts(self.generated_posts)
-                self._refresh_generated_summary()
+            self.lbl_status.setText("Mode AI realtime aktif")
+            self.log("Caption AI akan dibuat per grup saat giliran posting (bukan bulk).", "info")
 
         media_note = f"\nMedia: {len(media_paths)} file" if media_paths else ""
         limit_note = "\nBatas post: semua grup" if post_limit == 0 else f"\nBatas post: {total} grup"
-        mode_note = "\nMode konten: AI Batch OpenRouter" if content_mode == 1 else "\nMode konten: Spintax / Manual"
-        ai_note = f"\nCaption AI siap: {len(content_variants)}" if content_mode == 1 else ""
+        mode_note = "\nMode konten: AI Realtime OpenRouter" if content_mode == 1 else "\nMode konten: Spintax / Manual"
+        ai_note = "\nCaption AI: generate satu-satu saat proses berjalan" if content_mode == 1 else ""
         preview_note = ""
-        if content_mode == 1 and content_variants:
-            preview_text = build_caption_preview(groups, content_variants)
-            if preview_text:
-                preview_note = f"\n\nPreview mapping:\n{preview_text}"
         if not self.chk_skip_confirm.isChecked():
             reply = QMessageBox.question(
                 self, "Konfirmasi",
@@ -2122,8 +2615,12 @@ class FacebookPosterUI(QMainWindow):
             groups=groups,
             media_paths=media_paths,
             content_variants=content_variants,
+            content_mode=content_mode,
+            ai_api_key=api_key,
+            ai_model=model,
+            ai_fallback_to_manual=self.chk_auto_fallback.isChecked(),
             headless=self.chk_headless.isChecked(),
-            stop_on_pending=stop_on_pending,
+            stop_on_pending=not skip_on_pending,
             burst_pause_every=burst_pause_every,
             burst_pause_min=burst_pause_min,
             burst_pause_max=burst_pause_max,
