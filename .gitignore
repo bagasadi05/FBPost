@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 run_stdout.log
 run_stderr.log
+cookies.json
+app.log
+failed_groups.txt
+screenshots/
+ui_settings.json
+reports/
+generated_posts.json

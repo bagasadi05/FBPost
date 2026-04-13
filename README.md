@@ -1,6 +1,5 @@
-# Auto-Post-Group-Facebook
+﻿# Auto-Post-Group-Facebook
 Auto Posting Ke Banyak Group Facebook
-
 
 <p align="center">
   <img src="images/1.png" width="70%">
@@ -12,25 +11,11 @@ Auto Posting Ke Banyak Group Facebook
   <em>Tampilan Sample</em>
 </p>
 
-
-
-
-- TIDAK SEMUA GROUP BISA DI POSTING KADANG ADA YANG STATUS SUKSES / BERHASIL POSTING TAPI GA BERHASIL DI POSTING - Jika Gagal Atau Error Kemungkinan Group Di Kunci Atau Di Arsipkan Atau Menunggu Persetujuan Admin Dan Kadang Tiap Group Beda Beda Seperti Jual Beli Yang Hanya Bisa Posting Barang Dan Bisa Jadi UI Atau XPATH Ganti Karena Facebook Sering Gonta Ganti UI XPATH
-
-
-
+- TIDAK SEMUA GROUP BISA DI POSTING. Kadang status sukses tetapi posting tidak benar-benar terbit. Penyebab umum: grup dikunci/diarsipkan, butuh persetujuan admin, atau UI/XPATH Facebook berubah.
 
 **Note**
-- Saya Tes Bukan Pake Akun Biasa Tapi Pake Fanspage Untuk Menghindari Resiko Akun Kena Begal
-
-- Karena Kalo Pake Fanspage Meski Kena Begal Akun Utamanya atau Akun Admin Nya Paling Cuma Kena Peringatan Biasa Dan Fanspage Langsung Terhapus
-
-- Kalo Pake Akun Utama / Pribadi Sekali Kena Begal Ya Wassalam 
-  
-- Jadi Harap Jangan Gunakan Akun Utama / Pribadi Gunakan Akun Tuyul Atau Fanspage kecil untuk menghindari checkpoint dan banned dari meta
-  
-
-
+- Saya tes bukan pakai akun biasa, tapi pakai fanspage untuk mengurangi risiko akun utama.
+- Harap jangan gunakan akun utama/pribadi. Gunakan akun uji (tuyul) atau fanspage kecil untuk menghindari checkpoint/banned dari Meta.
 
 **Fitur utama**
 - Login pakai cookies (tanpa email/password)
@@ -39,7 +24,7 @@ Auto Posting Ke Banyak Group Facebook
 - Simpan daftar grup ke `groups.txt`
 - Dark theme + log real-time
 
-**Peringatan penting**  
+**Peringatan penting**
 Penggunaan otomatisasi di Facebook melanggar Terms of Service. Gunakan dengan risiko sendiri. Tidak bertanggung jawab atas banned akun.
 
 **Cara pakai singkat**
@@ -47,17 +32,34 @@ Penggunaan otomatisasi di Facebook melanggar Terms of Service. Gunakan dengan ri
 2. Simpan cookies Facebook ke `cookies.json`
 3. Jalankan: `python main.py`
 4. Klik "Ambil Daftar Grup" atau load dari `groups.txt`
-5. Tulis teks â†’ POST MASSAL ðŸš€
+5. Tulis teks lalu klik tombol **POST MASSAL**
 
 **Cara Ambil Cookies**
-1. install extension cookie-editor
-2. setelah terinstal buka cookie-editor di halaman beranda facebook kemudian pilih export terus pilih json terus copy kemudian buka file 'cookies.json' terus paste
-3. simpan dan jalankan toolsnya
-4. duduk santai tunggu hasil :v
+1. Install extension cookie-editor.
+2. Buka cookie-editor di halaman beranda Facebook lalu export dalam format JSON.
+3. Paste ke file `cookies.json` dengan format list objek cookie (contoh minimal):
 
+```json
+[
+  {
+    "name": "c_user",
+    "value": "ISI_NILAI_COOKIE",
+    "domain": ".facebook.com",
+    "path": "/"
+  },
+  {
+    "name": "xs",
+    "value": "ISI_NILAI_COOKIE",
+    "domain": ".facebook.com",
+    "path": "/"
+  }
+]
+```
+
+4. Simpan lalu jalankan tools.
 
 **Requirements**
-Python 3.9+ 
+Python 3.9+
 
 **Cara Menjalankan di Windows**
 - Opsi paling gampang: klik dua kali `start.bat`
