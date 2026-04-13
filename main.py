@@ -442,18 +442,24 @@ def open_group_composer(driver):
             "what's on your mind", "jual sesuatu", "sell something"
         ]
         lowered = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+        keyword_text_xpath = " or ".join([f"contains({lowered}, '{kw}')" for kw in keywords])
+        keyword_aria_xpath = " or ".join([
+            "contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
+            f"'{kw}')"
+            for kw in keywords
+        ])
         trigger_xpath = " | ".join([
             (
                 "//div[@role='button'"
                 " and not(ancestor::div[@role='dialog'])"
                 " and not(ancestor::div[@role='article'])"
-                f" and ({' or '.join([f'contains({lowered}, \"{kw}\")' for kw in keywords])})]"
+                f" and ({keyword_text_xpath})]"
             ),
             (
                 "//div[@role='button'"
                 " and not(ancestor::div[@role='dialog'])"
                 " and not(ancestor::div[@role='article'])"
-                f" and ({' or '.join([f'contains(translate(@aria-label, \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\", \"abcdefghijklmnopqrstuvwxyz\"), \"{kw}\")' for kw in keywords])})]"
+                f" and ({keyword_aria_xpath})]"
             )
         ])
 
@@ -526,7 +532,7 @@ def upload_media_files(driver, media_paths, container=None, timeout=45):
     media_input = wait_media_input(driver, container=container, timeout=4)
     if not media_input and not container:
         return False, "Composer post tidak valid untuk upload media"
-    if not media_input and not open_media_picker(container):
+    if not media_input and not open_media_picker(driver, container):
         return False, "Tombol upload media tidak ditemukan"
 
     if not media_input:
@@ -2235,4 +2241,3 @@ if __name__ == "__main__":
     window = FacebookPosterUI()
     window.show()
     sys.exit(app.exec())
-
