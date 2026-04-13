@@ -425,6 +425,9 @@ def wait_post_dialog(driver, timeout=10):
 def open_group_composer(driver):
     try:
         human_delay(1.5, 3)
+        existing_dialog = wait_post_dialog(driver, timeout=3)
+        if existing_dialog is not None:
+            return existing_dialog
 
         try:
             discussion_tabs = driver.find_elements(By.XPATH, "//div[@role='tablist']//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'discussion') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'diskusi')] | //div[@role='navigation']//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'discussion') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'diskusi')]")
@@ -442,32 +445,80 @@ def open_group_composer(driver):
             "what's on your mind", "jual sesuatu", "sell something"
         ]
         lowered = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
-        trigger_xpath = " | ".join([
+        keyword_text_xpath = " or ".join([f"contains({lowered}, '{kw}')" for kw in keywords])
+        keyword_aria_xpath = " or ".join([
+            "contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
+            f"'{kw}')"
+            for kw in keywords
+        ])
+        trigger_xpaths = [
             (
                 "//div[@role='button'"
                 " and not(ancestor::div[@role='dialog'])"
                 " and not(ancestor::div[@role='article'])"
-                f" and ({' or '.join([f'contains({lowered}, \"{kw}\")' for kw in keywords])})]"
+                f" and ({keyword_text_xpath})]"
             ),
             (
                 "//div[@role='button'"
                 " and not(ancestor::div[@role='dialog'])"
                 " and not(ancestor::div[@role='article'])"
-                f" and ({' or '.join([f'contains(translate(@aria-label, \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\", \"abcdefghijklmnopqrstuvwxyz\"), \"{kw}\")' for kw in keywords])})]"
-            )
-        ])
+                f" and ({keyword_aria_xpath})]"
+            ),
+            (
+                "//span[not(ancestor::div[@role='dialog'])"
+                f" and ({keyword_text_xpath})]"
+                "/ancestor::div[@role='button'][1]"
+            ),
+            (
+                "//div[@role='textbox' and @contenteditable='true' and not(ancestor::div[@role='dialog'])]"
+            ),
+        ]
 
-        triggers = driver.find_elements(By.XPATH, trigger_xpath)
+        triggers = []
+        for xpath in trigger_xpaths:
+            try:
+                triggers.extend(driver.find_elements(By.XPATH, xpath))
+            except Exception:
+                continue
+
+        seen = set()
+        unique_triggers = []
         for trigger in triggers:
-                try:
-                    if not trigger.is_displayed():
-                        continue
-                    driver.execute_script("arguments[0].click();", trigger)
-                    dialog = wait_post_dialog(driver, timeout=6)
-                    if dialog is not None:
-                        return dialog
-                except:
+            try:
+                ref = trigger.id
+                if ref in seen:
                     continue
+                seen.add(ref)
+                unique_triggers.append(trigger)
+            except Exception:
+                continue
+
+        for trigger in unique_triggers:
+            try:
+                if not trigger.is_displayed():
+                    continue
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", trigger)
+                human_delay(0.3, 0.8)
+                try:
+                    trigger.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", trigger)
+
+                dialog = wait_post_dialog(driver, timeout=5)
+                if dialog is not None:
+                    return dialog
+
+                inline_editor = wait_group_editor(driver, timeout=3)
+                if inline_editor is not None:
+                    try:
+                        return inline_editor.find_element(
+                            By.XPATH,
+                            "./ancestor::div[@role='dialog' or @role='region' or @data-pagelet][1]"
+                        )
+                    except Exception:
+                        return driver.find_element(By.TAG_NAME, "body")
+            except Exception:
+                continue
 
         return None
     except Exception as e:
@@ -526,7 +577,7 @@ def upload_media_files(driver, media_paths, container=None, timeout=45):
     media_input = wait_media_input(driver, container=container, timeout=4)
     if not media_input and not container:
         return False, "Composer post tidak valid untuk upload media"
-    if not media_input and not open_media_picker(container):
+    if not media_input and not open_media_picker(driver, container):
         return False, "Tombol upload media tidak ditemukan"
 
     if not media_input:
@@ -2235,4 +2286,3 @@ if __name__ == "__main__":
     window = FacebookPosterUI()
     window.show()
     sys.exit(app.exec())
-
